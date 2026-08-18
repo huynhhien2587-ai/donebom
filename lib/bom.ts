@@ -15,7 +15,6 @@ export function norm(value: unknown) {
 }
 
 export function groupOf(value: unknown) {
-  const original = value == null ? "" : String(value).trim();
   const s = norm(value);
   if (!s) return "";
   for (const [name, keys] of GROUP_RULES) {
@@ -24,7 +23,11 @@ export function groupOf(value: unknown) {
       if (nk && (s === nk || (nk.length >= 3 && s.includes(nk)))) return name;
     }
   }
-  return original;
+  // QUAN TRỌNG: nếu giá trị không khớp bất kỳ xưởng nào đã cấu hình trong
+  // GROUP_RULES (ví dụ ô chứa số lượng, mã khác, hoặc dữ liệu không liên
+  // quan), TRẢ VỀ RỖNG để dòng đó bị loại bỏ ở bước lọc — tránh việc mỗi
+  // giá trị lạ (số, mã...) bị biến thành 1 "nhóm xưởng" rác riêng lẻ.
+  return "";
 }
 
 function cleanCell(v: unknown): string | number | boolean {
