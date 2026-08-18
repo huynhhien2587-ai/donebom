@@ -10,7 +10,10 @@ const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
 export async function POST(req: Request) {
   const admin = supabaseAdmin();
-  let storagePath: string | null = null;
+  const bucket = process.env.SUPABASE_BUCKET || "bom-files";
+  let uploadedSourcePath: string | null = null;
+  let uploadedResultPath: string | null = null;
+
   try {
     const { path, filename, token } = await req.json();
     if (!path || !filename || !token) {
@@ -28,11 +31,9 @@ export async function POST(req: Request) {
     if (!String(path).startsWith(expectedPrefix)) {
       return NextResponse.json({ error: "Đường dẫn file không hợp lệ." }, { status: 403 });
     }
-    storagePath = path;
+    uploadedSourcePath = path;
 
-    const { data, error } = await admin.storage
-      .from(process.env.SUPABASE_BUCKET || "bom-files")
-      .download(path);
+    const { data, error } = await admin.storage.from(bucket).download(path);
     if (error || !data) throw new Error(error?.message || "Không tải được file từ Supabase.");
 
     const buffer = await data.arrayBuffer();
@@ -40,25 +41,43 @@ export async function POST(req: Request) {
 
     const result: BomData = processWorkbook(buffer, filename);
 
+    // QUAN TRỌNG: dữ liệu đầy đủ (có thể hàng chục nghìn dòng) được lưu
+    // vào Supabase STORAGE dưới dạng 1 file JSON, KHÔNG ghi vào cột jsonb
+    // của Postgres nữa. Ghi thẳng khối dữ liệu lớn vào Postgres dễ vượt
+    // quá statement_timeout của DB (đây chính là nguyên nhân lỗi "canceling
+    // statement due to statement timeout" trước đây). Storage xử lý file
+    // lớn tốt hơn nhiều và không bị giới hạn thời gian như 1 câu lệnh SQL.
+    uploadedResultPath = `results/${user.id}/${token}.json`;
+    const resultBlob = new Blob([JSON.stringify(result)], { type: "application/json" });
+    const { error: resultUploadError } = await admin.storage
+      .from(bucket)
+      .upload(uploadedResultPath, resultBlob, { contentType: "application/json", upsert: true });
+    if (resultUploadError) throw new Error(`Lưu kết quả vào Storage thất bại: ${resultUploadError.message}`);
+
+    // DB chỉ lưu thông tin nhẹ (không có "rows") -> ghi cực nhanh, không
+    // bao giờ chạm statement_timeout dù file BOM lớn cỡ nào.
     const payload = {
       token,
       user_id: user.id,
-      source_path: path,
       filename,
       total: result.total,
-      result,
+      columns_json: result.columns,
+      groups_json: result.groups,
+      result_path: uploadedResultPath,
       created_at: new Date().toISOString(),
     };
     const { error: dbError } = await admin.from("bom_jobs").upsert(payload, { onConflict: "token" });
-    if (dbError) throw new Error(`Lưu kết quả Supabase thất bại: ${dbError.message}`);
+    if (dbError) {
+      // Ghi DB lỗi thì dọn luôn file result vừa tạo để tránh rác Storage.
+      await admin.storage.from(bucket).remove([uploadedResultPath]).catch(() => {});
+      throw new Error(`Lưu thông tin phiên vào Supabase thất bại: ${dbError.message}`);
+    }
 
-    // File gốc đã được đọc và lưu kết quả vào DB, không cần giữ trong Storage
-    // nữa -> dọn ngay để tránh phình dung lượng bucket theo thời gian.
-    await admin.storage.from(process.env.SUPABASE_BUCKET || "bom-files").remove([path]);
+    // File BOM gốc đã đọc xong và không cần giữ lại trong Storage nữa.
+    await admin.storage.from(bucket).remove([path]);
 
     // Chỉ trả về bản xem trước (tối đa PREVIEW_ROWS dòng) cho client, KHÔNG
-    // dội toàn bộ hàng nghìn dòng qua mạng — dữ liệu đầy đủ đã nằm trong
-    // Supabase và sẽ được dùng lại khi export qua /api/export.
+    // dội toàn bộ hàng nghìn dòng qua mạng.
     return NextResponse.json({
       token,
       filename: result.filename,
@@ -71,9 +90,11 @@ export async function POST(req: Request) {
       previewRows: result.rows.slice(0, PREVIEW_ROWS),
     });
   } catch (e) {
-    // Nếu xử lý lỗi giữa chừng, vẫn cố dọn file tạm để không rác Storage.
-    if (storagePath) {
-      await admin.storage.from(process.env.SUPABASE_BUCKET || "bom-files").remove([storagePath]).catch(() => {});
+    if (uploadedSourcePath) {
+      await admin.storage.from(bucket).remove([uploadedSourcePath]).catch(() => {});
+    }
+    if (uploadedResultPath) {
+      await admin.storage.from(bucket).remove([uploadedResultPath]).catch(() => {});
     }
     return NextResponse.json({ error: e instanceof Error ? e.message : "Không xử lý được BOM." }, { status: 500 });
   }
