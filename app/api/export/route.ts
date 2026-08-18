@@ -9,11 +9,23 @@ export async function POST(req: Request) {
   try {
     const { token, kind, group } = await req.json();
     const admin = supabaseAdmin();
+    const bucket = process.env.SUPABASE_BUCKET || "bom-files";
     const { data: { user } } = await admin.auth.getUser(req.headers.get("Authorization")?.replace("Bearer ", "") || "");
     if (!user) return NextResponse.json({ error: "Bạn cần đăng nhập." }, { status: 401 });
-    const { data: job, error } = await admin.from("bom_jobs").select("result").eq("token", token).eq("user_id", user.id).single();
-    if (error || !job) throw new Error("Không tìm thấy phiên BOM. Hãy phân tích lại file.");
-    const data = job.result as BomData;
+
+    const { data: job, error } = await admin
+      .from("bom_jobs")
+      .select("result_path")
+      .eq("token", token)
+      .eq("user_id", user.id)
+      .single();
+    if (error || !job?.result_path) throw new Error("Không tìm thấy phiên BOM. Hãy phân tích lại file.");
+
+    // Dữ liệu đầy đủ (rows) nằm trong Storage, không phải trong Postgres.
+    const { data: resultFile, error: downloadError } = await admin.storage.from(bucket).download(job.result_path);
+    if (downloadError || !resultFile) throw new Error("Không tải được dữ liệu BOM đã lưu. Hãy phân tích lại file.");
+    const data = JSON.parse(await resultFile.text()) as BomData;
+
     let out: Buffer, filename: string;
     if (kind === "all") {
       out = makeAllWorkbook(data); filename = "BOM_XUONG_TAT_CA.xlsx";
