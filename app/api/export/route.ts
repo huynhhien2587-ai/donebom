@@ -31,7 +31,7 @@ export async function POST(req: Request) {
       out = makeAllWorkbook(data); filename = "BOM_XUONG_TAT_CA.xlsx";
     } else {
       if (!group || !data.groups.some(g => g.name === group)) throw new Error("Không tìm thấy xưởng.");
-      const rows = data.rows.filter(r => r.__GROUP__ === group);
+      const rows = data.rows.filter(r => Array.isArray(r.__GROUPS__) && (r.__GROUPS__ as string[]).includes(group));
       out = makeWorkbook(rows, data.columns);
       filename = `${safeSheet(group)}.xlsx`;
     }
